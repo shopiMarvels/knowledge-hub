@@ -1,0 +1,106 @@
+services:
+  # Frontend web application
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ../apps/web:/app
+      - /app/node_modules
+    depends_on:
+      - api
+    networks:
+      - knowledge-hub
+
+  # Backend API service
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:password@db:5432/knowledge_hub
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ../apps/api:/app
+      - /app/node_modules
+    depends_on:
+      - db
+      - redis
+      - ollama
+    networks:
+      - knowledge-hub
+
+  # Background worker service
+  worker:
+    build:
+      context: ../packages/agents
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:password@db:5432/knowledge_hub
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ../packages/agents:/app
+      - /app/node_modules
+    depends_on:
+      - db
+      - redis
+      - ollama
+    networks:
+      - knowledge-hub
+
+  # PostgreSQL database
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=knowledge_hub
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - knowledge-hub
+
+  # Redis cache and queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - knowledge-hub
+
+  # Ollama for local LLM inference
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_ORIGINS=*
+    networks:
+      - knowledge-hub
+
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+
+networks:
+  knowledge-hub:
+    driver: bridge
