@@ -9,13 +9,19 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
-COPY requirements.txt .
+COPY apps/api/requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy the entire repository for package access
 COPY . .
+
+# Copy main.py to root for uvicorn to find it
+COPY apps/api/main.py .
+
+# Set Python path to include repo root for package imports
+ENV PYTHONPATH=/app
 
 # Expose the port
 EXPOSE 8000

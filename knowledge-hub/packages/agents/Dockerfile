@@ -11,13 +11,17 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
-COPY requirements.txt .
+COPY packages/agents/requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy the entire repository for package access
 COPY . .
+
+# Copy worker.py and jobs to root for the CMD to find them
+COPY packages/agents/worker.py .
+COPY packages/agents/jobs ./jobs
 
 # Create directories for MCP tools and data
 RUN mkdir -p /app/mcp_tools /app/data /app/logs

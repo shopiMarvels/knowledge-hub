@@ -7,10 +7,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=production
       - NEXT_PUBLIC_API_URL=http://localhost:8000
     volumes:
-      - ../apps/web:/app
       - /app/node_modules
     depends_on:
       - api
@@ -20,8 +19,8 @@ services:
   # Backend API service
   api:
     build:
-      context: ../apps/api
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/api/Dockerfile
     ports:
       - "8000:8000"
     environment:
@@ -29,9 +28,9 @@ services:
       - DATABASE_URL=postgresql://postgres:password@db:5432/knowledge_hub
       - REDIS_URL=redis://redis:6379
       - OLLAMA_URL=http://ollama:11434
+      - STORAGE_DIR=/data
     volumes:
-      - ../apps/api:/app
-      - /app/node_modules
+      - data:/data
     depends_on:
       - db
       - redis
@@ -42,16 +41,16 @@ services:
   # Background worker service
   worker:
     build:
-      context: ../packages/agents
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: packages/agents/Dockerfile
     environment:
       - NODE_ENV=development
       - DATABASE_URL=postgresql://postgres:password@db:5432/knowledge_hub
       - REDIS_URL=redis://redis:6379
       - OLLAMA_URL=http://ollama:11434
+      - STORAGE_DIR=/data
     volumes:
-      - ../packages/agents:/app
-      - /app/node_modules
+      - data:/data
     depends_on:
       - db
       - redis
@@ -100,6 +99,7 @@ volumes:
   postgres_data:
   redis_data:
   ollama_data:
+  data:
 
 networks:
   knowledge-hub:

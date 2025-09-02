@@ -1,93 +1,84 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import os
-from datetime import datetime
-import logging
+from redis import Redis
+from rq import Queue
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import os, pathlib, uuid
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from packages.db.models import Base
+from packages.db.models import Document, Chunk  # (we'll add these in step 4)
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Knowledge Hub API",
-    description="A powerful knowledge management system with AI capabilities",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@db:5432/knowledge_hub")
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+STORAGE_DIR = os.getenv("STORAGE_DIR", "/data")
 
-# Configure CORS
+app = FastAPI(title="MCP Knowledge Hub API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Frontend URL
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"],
+    allow_methods=["*"] ,
     allow_headers=["*"],
 )
 
-# Response models
-class HealthResponse(BaseModel):
+# DB session
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+# Queue
+redis = Redis.from_url(REDIS_URL)
+q = Queue("default", connection=redis)
+
+class Health(BaseModel):
     status: str
-    timestamp: datetime
     version: str
-    environment: str
 
-class MessageResponse(BaseModel):
-    message: str
+@app.get("/healthz", response_model=Health)
+async def healthz():
+    return {"status": "ok", "version": APP_VERSION}
 
-# Health check endpoint
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """
-    Health check endpoint to verify the API is running.
-    """
-    return HealthResponse(
-        status="healthy",
-        timestamp=datetime.now(),
-        version="1.0.0",
-        environment=os.getenv("NODE_ENV", "development")
-    )
+@app.get("/version")
+async def version():
+    return {"version": APP_VERSION}
 
-# Root endpoint
-@app.get("/", response_model=MessageResponse)
-async def root():
-    """
-    Root endpoint with welcome message.
-    """
-    return MessageResponse(message="Welcome to Knowledge Hub API")
+@app.post("/documents")
+async def upload_document(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(400, "Missing filename")
+    ext = pathlib.Path(file.filename).suffix.lower()
+    if ext not in [".pdf", ".docx", ".txt"]:
+        raise HTTPException(415, "Only .pdf, .docx, .txt supported")
 
-# API Info endpoint
-@app.get("/info")
-async def api_info():
-    """
-    Get API information and environment details.
-    """
-    return {
-        "name": "Knowledge Hub API",
-        "version": "1.0.0",
-        "environment": os.getenv("NODE_ENV", "development"),
-        "database_connected": True,  # TODO: Add actual DB connection check
-        "redis_connected": True,     # TODO: Add actual Redis connection check
-        "ollama_connected": True,    # TODO: Add actual Ollama connection check
-    }
+    # Persist metadata
+    session = SessionLocal()
+    try:
+        doc = Document(filename=file.filename, mime=file.content_type or "application/octet-stream", status="uploaded")
+        session.add(doc)
+        session.commit()
+        session.refresh(doc)
+        # Save file under /data/uploads/{doc_id}/filename
+        doc_dir = pathlib.Path(STORAGE_DIR) / "uploads" / str(doc.id)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        dst = doc_dir / file.filename
+        with open(dst, "wb") as f:
+            f.write(await file.read())
+        # queue job
+        q.enqueue("jobs.parse_document.run", document_id=doc.id, path=str(dst), storage_dir=STORAGE_DIR)
+        return {"status": "queued", "document_id": doc.id}
+    finally:
+        session.close()
 
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Knowledge Hub API is starting up...")
-    # TODO: Initialize database connections
-    # TODO: Initialize Redis connections
-    # TODO: Verify Ollama connection
-
-# Shutdown event
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Knowledge Hub API is shutting down...")
-    # TODO: Close database connections
-    # TODO: Close Redis connections
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/documents/{doc_id}")
+async def get_document(doc_id: int):
+    session = SessionLocal()
+    try:
+        doc = session.query(Document).get(doc_id)
+        if not doc:
+            raise HTTPException(404, "Not found")
+        # count chunks
+        chunk_count = session.query(Chunk).filter(Chunk.document_id == doc_id).count()
+        return {"id": doc.id, "filename": doc.filename, "status": doc.status, "chunks": chunk_count}
+    finally:
+        session.close()
