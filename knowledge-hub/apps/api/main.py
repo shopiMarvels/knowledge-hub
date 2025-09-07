@@ -5,6 +5,7 @@ from redis import Redis
 from rq import Queue
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from typing import List, Optional
 import os, pathlib, uuid
 
 from packages.db.models import Base
@@ -34,6 +35,23 @@ q = Queue("default", connection=redis)
 class Health(BaseModel):
     status: str
     version: str
+
+class SearchRequest(BaseModel):
+    query: str
+    k: int = 5
+
+class ChunkResult(BaseModel):
+    id: int
+    text: str
+    chunk_index: int
+    document_id: int
+    filename: str
+    similarity_score: float
+
+class SearchResponse(BaseModel):
+    query: str
+    results: List[ChunkResult]
+    total_results: int
 
 @app.get("/healthz", response_model=Health)
 async def healthz():
@@ -82,3 +100,69 @@ async def get_document(doc_id: int):
         return {"id": doc.id, "filename": doc.filename, "status": doc.status, "chunks": chunk_count}
     finally:
         session.close()
+
+@app.post("/search", response_model=SearchResponse)
+async def search_documents(request: SearchRequest):
+    """Semantic search through document chunks using FAISS"""
+    try:
+        # Import the search function from the embedding job
+        from packages.agents.jobs.embed_chunks import search_similar_chunks
+        
+        # Get similar chunk IDs and scores
+        similar_chunks = search_similar_chunks(request.query, request.k)
+        
+        if not similar_chunks:
+            return SearchResponse(
+                query=request.query,
+                results=[],
+                total_results=0
+            )
+        
+        # Get chunk details from database
+        session = SessionLocal()
+        try:
+            chunk_ids = [chunk_id for chunk_id, _ in similar_chunks]
+            chunks = session.query(Chunk, Document).join(
+                Document, Chunk.document_id == Document.id
+            ).filter(Chunk.id.in_(chunk_ids)).all()
+            
+            # Create results with similarity scores
+            chunk_data = {chunk.id: (chunk, doc) for chunk, doc in chunks}
+            results = []
+            
+            for chunk_id, similarity_score in similar_chunks:
+                if chunk_id in chunk_data:
+                    chunk, doc = chunk_data[chunk_id]
+                    results.append(ChunkResult(
+                        id=chunk.id,
+                        text=chunk.text,
+                        chunk_index=chunk.chunk_index,
+                        document_id=chunk.document_id,
+                        filename=doc.filename,
+                        similarity_score=similarity_score
+                    ))
+            
+            return SearchResponse(
+                query=request.query,
+                results=results,
+                total_results=len(results)
+            )
+            
+        finally:
+            session.close()
+            
+    except Exception as e:
+        raise HTTPException(500, f"Search failed: {str(e)}")
+
+@app.post("/embed")
+async def trigger_embedding(document_id: Optional[int] = None):
+    """Trigger embedding job for documents"""
+    try:
+        if document_id:
+            q.enqueue("jobs.embed_chunks.run", document_id=document_id)
+            return {"status": "embedding_queued", "document_id": document_id}
+        else:
+            q.enqueue("jobs.embed_chunks.run")
+            return {"status": "embedding_queued", "message": "All unembedded chunks queued"}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to queue embedding job: {str(e)}")
