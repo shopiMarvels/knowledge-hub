@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from redis import Redis
@@ -6,7 +6,7 @@ from rq import Queue
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from typing import List, Optional
-import os, pathlib, uuid
+import os, pathlib, uuid, re
 
 from packages.db.models import Base
 from packages.db.models import Document, Chunk  # (we'll add these in step 4)
@@ -15,6 +15,7 @@ APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@db:5432/knowledge_hub")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 STORAGE_DIR = os.getenv("STORAGE_DIR", "/data")
+MIN_SIM = float(os.getenv("MIN_SIM", "0.15"))  # threshold for low-confidence
 
 app = FastAPI(title="MCP Knowledge Hub API")
 app.add_middleware(
@@ -52,6 +53,26 @@ class SearchResponse(BaseModel):
     query: str
     results: List[ChunkResult]
     total_results: int
+
+class QARequest(BaseModel):
+    query: str
+    k: int = 5
+    max_tokens: int = 384
+
+class Citation(BaseModel):
+    document_id: int
+    chunk_index: int
+
+class ContextHit(BaseModel):
+    document_id: int
+    chunk_index: int
+    score: float
+    preview: str
+
+class QAResponse(BaseModel):
+    answer: str
+    citations: List[Citation]
+    hits: List[ContextHit]
 
 @app.get("/healthz", response_model=Health)
 async def healthz():
@@ -166,3 +187,86 @@ async def trigger_embedding(document_id: Optional[int] = None):
             return {"status": "embedding_queued", "message": "All unembedded chunks queued"}
     except Exception as e:
         raise HTTPException(500, f"Failed to queue embedding job: {str(e)}")
+
+@app.post("/qa", response_model=QAResponse)
+async def qa(req: QARequest):
+    """Question & Answer endpoint with citations"""
+    try:
+        # Import here to avoid startup issues if FAISS files don't exist yet
+        from apps.api.retrieval import retrieve_topk
+        from apps.api.llm import generate_answer
+        
+        session = SessionLocal()
+        try:
+            # Retrieve relevant chunks
+            results = retrieve_topk(session, req.query, k=req.k)
+            
+            if not results:
+                return QAResponse(
+                    answer="I don't have any relevant information to answer that question. Please try uploading some documents first or rephrase your question.",
+                    citations=[],
+                    hits=[]
+                )
+            
+            # Filter by similarity threshold and build tagged contexts
+            tagged_contexts = []
+            valid_results = []
+            
+            for chunk, score in results:
+                if score < MIN_SIM:
+                    continue
+                    
+                # Get document info for better context tags
+                document = session.query(Document).filter(Document.id == chunk.document_id).first()
+                if document:
+                    tag = f"Doc {chunk.document_id} #{chunk.chunk_index}"
+                    # Keep contexts short to fit model context window
+                    text = chunk.text[:1800] if len(chunk.text) > 1800 else chunk.text
+                    tagged_contexts.append((tag, text))
+                    valid_results.append((chunk, score, document))
+            
+            if not tagged_contexts:
+                return QAResponse(
+                    answer="I found some potentially relevant information, but it doesn't seem closely related enough to your question. Please try rephrasing or being more specific.",
+                    citations=[],
+                    hits=[]
+                )
+            
+            # Generate answer using LLM
+            answer = await generate_answer(req.query, tagged_contexts, max_tokens=req.max_tokens)
+            
+            # Extract citations from answer using regex
+            citation_matches = re.findall(r"\(Doc (\d+) #(\d+)\)", answer)
+            citations = [
+                Citation(document_id=int(doc_id), chunk_index=int(chunk_idx))
+                for doc_id, chunk_idx in set(citation_matches)  # Remove duplicates
+            ]
+            
+            # Prepare context hits for UI
+            hits = [
+                ContextHit(
+                    document_id=chunk.document_id,
+                    chunk_index=chunk.chunk_index,
+                    score=float(score),
+                    preview=chunk.text[:240] + "..." if len(chunk.text) > 240 else chunk.text
+                )
+                for chunk, score, document in valid_results[:6]  # Limit to top 6 for UI
+            ]
+            
+            return QAResponse(
+                answer=answer,
+                citations=citations,
+                hits=hits
+            )
+            
+        finally:
+            session.close()
+            
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=503, 
+            detail="Embedding system not ready. Please ensure documents have been embedded first."
+        )
+    except Exception as e:
+        print(f"Error in Q&A endpoint: {e}")
+        raise HTTPException(500, f"Q&A failed: {str(e)}")
