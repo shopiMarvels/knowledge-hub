@@ -16,6 +16,7 @@ class Document(Base):
     filename: Mapped[str] = mapped_column(String)
     mime: Mapped[str] = mapped_column(String, default="application/octet-stream")
     status: Mapped[str] = mapped_column(String, default="uploaded")
+    summary: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class Chunk(Base):
@@ -26,4 +27,11 @@ class Chunk(Base):
     text: Mapped[str] = mapped_column(Text)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     embedding_vector_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+class DocumentTag(Base):
+    __tablename__ = "document_tags"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(Integer, ForeignKey("documents.id", ondelete="CASCADE"))
+    tag: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())

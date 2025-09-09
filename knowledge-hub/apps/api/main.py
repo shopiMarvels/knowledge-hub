@@ -9,7 +9,7 @@ from typing import List, Optional
 import os, pathlib, uuid, re
 
 from packages.db.models import Base
-from packages.db.models import Document, Chunk  # (we'll add these in step 4)
+from packages.db.models import Document, Chunk, DocumentTag
 
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@db:5432/knowledge_hub")
@@ -74,6 +74,20 @@ class QAResponse(BaseModel):
     citations: List[Citation]
     hits: List[ContextHit]
 
+class TagRequest(BaseModel):
+    force: bool = False
+
+class SummarizeRequest(BaseModel):
+    force: bool = False
+
+class DocumentResponse(BaseModel):
+    id: int
+    filename: str
+    status: str
+    chunks: int
+    tags: List[str]
+    summary: Optional[str]
+
 @app.get("/healthz", response_model=Health)
 async def healthz():
     return {"status": "ok", "version": APP_VERSION}
@@ -109,16 +123,30 @@ async def upload_document(file: UploadFile = File(...)):
     finally:
         session.close()
 
-@app.get("/documents/{doc_id}")
+@app.get("/documents/{doc_id}", response_model=DocumentResponse)
 async def get_document(doc_id: int):
     session = SessionLocal()
     try:
         doc = session.query(Document).get(doc_id)
         if not doc:
             raise HTTPException(404, "Not found")
-        # count chunks
+        
+        # Count chunks
         chunk_count = session.query(Chunk).filter(Chunk.document_id == doc_id).count()
-        return {"id": doc.id, "filename": doc.filename, "status": doc.status, "chunks": chunk_count}
+        
+        # Get tags
+        tags = [t.tag for t in session.query(DocumentTag).filter(
+            DocumentTag.document_id == doc_id
+        ).order_by(DocumentTag.tag).all()]
+        
+        return DocumentResponse(
+            id=doc.id,
+            filename=doc.filename,
+            status=doc.status,
+            chunks=chunk_count,
+            tags=tags,
+            summary=doc.summary
+        )
     finally:
         session.close()
 
@@ -270,3 +298,33 @@ async def qa(req: QARequest):
     except Exception as e:
         print(f"Error in Q&A endpoint: {e}")
         raise HTTPException(500, f"Q&A failed: {str(e)}")
+
+@app.post('/documents/{doc_id}/tag')
+async def trigger_tag(doc_id: int, req: TagRequest = TagRequest()):
+    """Trigger auto-tagging for a document"""
+    session = SessionLocal()
+    try:
+        doc = session.query(Document).get(doc_id)
+        if not doc:
+            raise HTTPException(404, 'Document not found')
+        
+        # Queue the tagging job
+        q.enqueue('jobs.tag_document.run', document_id=doc_id)
+        return {'status': 'queued', 'document_id': doc_id, 'job': 'tag_document'}
+    finally:
+        session.close()
+
+@app.post('/documents/{doc_id}/summarize')
+async def trigger_summarize(doc_id: int, req: SummarizeRequest = SummarizeRequest()):
+    """Trigger summarization for a document"""
+    session = SessionLocal()
+    try:
+        doc = session.query(Document).get(doc_id)
+        if not doc:
+            raise HTTPException(404, 'Document not found')
+        
+        # Queue the summarization job
+        q.enqueue('jobs.summarize_document.run', document_id=doc_id)
+        return {'status': 'queued', 'document_id': doc_id, 'job': 'summarize_document'}
+    finally:
+        session.close()

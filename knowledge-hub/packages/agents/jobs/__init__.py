@@ -1,1 +1,1 @@
-# jobs package
+# empty file so Python treats jobs/ as a package

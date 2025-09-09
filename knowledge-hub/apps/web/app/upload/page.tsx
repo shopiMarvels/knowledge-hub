@@ -1,4 +1,4 @@
-'use client'
+ 'use client'
 import { useState } from 'react'
 
 export default function UploadPage() {
@@ -35,7 +35,12 @@ export default function UploadPage() {
         <button className="px-4 py-2 rounded bg-black text-white" type="submit" disabled={!file}>Upload</button>
       </form>
       {status && (<p className="mt-4">{status}</p>)}
-      {docId && (<p className="text-sm text-gray-500">Document ID: {docId}</p>)}
+      {docId && (
+        <div className="mt-4 space-y-2">
+          <p className="text-sm text-gray-500">Document ID: {docId}</p>
+          <a href={`/documents/${docId}`} className="text-blue-600 hover:underline">View document</a>
+        </div>
+      )}
     </main>
   )
 }
